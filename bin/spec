@@ -1,0 +1,18 @@
+CREATE OR REPLACE PACKAGE pkg_repo_works AS
+
+    PROCEDURE enable_repo_constraints(p_validation IN NUMBER);
+
+    PROCEDURE disable_repo_constraints;
+
+    PROCEDURE truncate_repo;
+
+    PROCEDURE truncate_tables;
+
+    PROCEDURE grant_select_privilege(target_schema IN VARCHAR2);
+
+    PROCEDURE copy_repo_data(source_schema IN VARCHAR2, p_session_logs IN NUMBER);
+
+    PROCEDURE copy_snp_data_table(source_schema IN VARCHAR2);
+--UPDATE DOES NOT WORK!
+--PROCEDURE change_work_repo_users(postfix IN VARCHAR2);
+END;

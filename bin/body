@@ -1,0 +1,162 @@
+CREATE OR REPLACE PACKAGE BODY pkg_repo_works AS
+    v_dyntask      LONG;
+
+    PROCEDURE enable_repo_constraints(p_validation IN NUMBER) IS
+        validation_keyword VARCHAR2(30);
+    BEGIN
+        validation_keyword := CASE WHEN p_validation = 1 THEN 'validate' ELSE 'novalidate' END;
+
+        FOR r
+            IN (  SELECT 'alter table ' || table_name || ' enable ' || validation_keyword || ' constraint ' || CONSTRAINT_NAME q
+                    FROM user_constraints
+                   WHERE 1 = 1
+                ORDER BY CASE
+                             WHEN constraint_name LIKE 'SYS%' THEN 1
+                             WHEN constraint_name LIKE 'PK%' THEN 2
+                             WHEN constraint_name LIKE 'AK%' THEN 3
+                             WHEN constraint_name LIKE 'FK%' THEN 99
+                             ELSE 4
+                         END) LOOP
+            EXECUTE IMMEDIATE r.q;
+        END LOOP;
+
+        NULL;
+    END enable_repo_constraints;
+
+    PROCEDURE disable_repo_constraints IS
+    BEGIN
+        FOR r IN (SELECT 'alter table ' || table_name || ' disable constraint ' || CONSTRAINT_NAME q
+                    FROM user_constraints
+                   WHERE 1 = 1) LOOP
+            EXECUTE IMMEDIATE r.q;
+        END LOOP;
+    END disable_repo_constraints;
+
+    PROCEDURE truncate_repo IS
+    BEGIN
+        disable_repo_constraints();
+        truncate_tables();
+    END truncate_repo;
+
+    PROCEDURE truncate_tables IS
+    BEGIN
+        FOR r IN (SELECT 'truncate table ' || table_name q
+                    FROM user_tables
+                   WHERE 1 = 1 AND table_name LIKE 'SNP%' AND table_name NOT LIKE '%_BCK' AND table_name NOT LIKE '%_BAK' AND table_name NOT LIKE '%_YDK') LOOP
+            EXECUTE IMMEDIATE r.q;
+        END LOOP;
+    END truncate_tables;
+
+    PROCEDURE grant_select_privilege(target_schema IN VARCHAR2) IS
+    BEGIN
+        FOR r IN (SELECT 'grant select on ' || table_name || ' to ' || target_schema q
+                    FROM user_tables
+                   WHERE 1 = 1 AND table_name LIKE 'SNP%' AND table_name NOT LIKE '%_BCK' AND table_name NOT LIKE '%_BAK' AND table_name NOT LIKE '%_YDK') LOOP
+            EXECUTE IMMEDIATE r.q;
+        END LOOP;
+    END grant_select_privilege;
+
+    PROCEDURE copy_repo_data(source_schema IN VARCHAR2, p_session_logs IN NUMBER) IS
+        is_master_repo NUMBER := 0;
+    BEGIN
+        IF p_session_logs = 1 THEN
+            FOR r IN (SELECT 'insert into ' || table_name || ' select * from ' || source_schema || '.' || table_name Q, table_name
+                        FROM user_tables
+                       WHERE 1 = 1
+                         AND table_name LIKE 'SNP%'
+                         AND table_name NOT LIKE '%_BCK'
+                         AND table_name NOT LIKE '%_BAK'
+                         AND table_name NOT LIKE '%_YDK') LOOP
+                IF r.table_name != 'SNP_DATA' THEN
+                    EXECUTE IMMEDIATE r.q;
+
+                    COMMIT;
+                ELSE
+                    --copy snp_data
+                    copy_snp_data_table(source_schema);
+                    is_master_repo := 1;
+                END IF;
+            END LOOP;
+        ELSE
+            FOR r IN (SELECT 'insert into ' || table_name || ' select * from ' || source_schema || '.' || table_name Q, table_name
+                        FROM user_tables
+                       WHERE 1 = 1
+                         AND table_name LIKE 'SNP%'
+                         AND table_name NOT LIKE '%_BCK'
+                         AND table_name NOT LIKE '%_BAK'
+                         AND table_name NOT LIKE '%_YDK'
+                         AND table_name NOT IN ('SNP_SESS_TXT_LOG'
+                                              , 'SNP_SESS_TASK_LOG'
+                                              , 'SNP_TASK_TXT'
+                                              , 'SNP_STEP_LOG'
+                                              , 'SNP_SESS_TASK'
+                                              , 'SNP_SEQ_SESS'
+                                              , 'SNP_SESS_STEP'
+                                              , 'SNP_VAR_SESS'
+                                              , 'SNP_SESSION'
+                                              , 'SNP_SESS_STEP_LV'
+                                              , 'SNP_SESS_TASK_LS')) LOOP
+                IF r.table_name != 'SNP_DATA' THEN
+                    EXECUTE IMMEDIATE r.q;
+
+                    COMMIT;
+                ELSE
+                    --copy snp_data
+                    copy_snp_data_table(source_schema);
+                    is_master_repo := 1;
+                END IF;
+            END LOOP;
+        END IF;
+    END copy_repo_data;
+
+    PROCEDURE copy_snp_data_table(source_schema IN VARCHAR2) IS
+        source_col_data_type VARCHAR2(30);
+        target_col_data_type VARCHAR2(30);
+        long_raw_column_on_target EXCEPTION;
+    BEGIN
+        SELECT data_type
+          INTO target_col_data_type
+          FROM user_tab_columns
+         WHERE 1 = 1 AND table_name = 'SNP_DATA' AND column_name = 'DATA_CONTENTS';
+
+        IF target_col_data_type = 'LONG RAW' THEN
+            --err
+            RAISE long_raw_column_on_target;
+        END IF;
+
+        --check if data_contents column is long raw
+        SELECT data_type
+          INTO source_col_data_type
+          FROM all_tab_columns
+         WHERE 1 = 1 AND owner = source_schema AND table_name = 'SNP_DATA' AND column_name = 'DATA_CONTENTS';
+
+        --if long raw, then convert while insert
+        IF source_col_data_type = 'LONG RAW' THEN
+            v_dyntask := 'insert into SNP_DATA (i_data, data_contents) select i_data, to_lob(data_contents) data_contents from ' || source_schema || '.SNP_DATA';
+
+            EXECUTE IMMEDIATE v_dyntask;
+
+            COMMIT;
+        ELSE
+            --else copy as is
+            v_dyntask := 'insert into SNP_DATA (i_data, data_contents) select i_data, data_contents from ' || source_schema || '.SNP_DATA';
+
+            EXECUTE IMMEDIATE v_dyntask;
+
+            COMMIT;
+        END IF;
+    EXCEPTION
+        WHEN long_raw_column_on_target THEN
+            DBMS_OUTPUT.put_line('Data type of DATA_CONTENTS column in SNP_DATA on ' || USER || ' is LONG RAW! Alter to BLOB.');
+    END copy_snp_data_table;
+--UPDATE DOES NOT WORK!
+--    PROCEDURE change_work_repo_users(postfix IN VARCHAR2) IS
+--    BEGIN
+--        UPDATE SNP_CONNECT
+--           SET USER_NAME = USER_NAME || '_TEMP'
+--         WHERE I_CONNECT IN (SELECT C.I_CONNECT
+--                               FROM SNP_REM_REP C);
+--
+--        COMMIT;
+--    END change_work_repo_users;
+END;
